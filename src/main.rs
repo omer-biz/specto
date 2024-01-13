@@ -6,6 +6,7 @@ use std::{
     thread,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use notify::{RecursiveMode, Watcher};
 use tiny_http::{Response, Server};
@@ -20,7 +21,7 @@ pub struct Args {
     #[arg(short, long, value_name = "ip:port", default_value = "localhost:9000")]
     address: String,
 
-    /// options to put after the `elm make` command.
+    /// options to put after the `elm make` command
     #[arg(last = true, value_name = "<elm-options>")]
     elm_options: Option<Vec<String>>,
 }
@@ -38,8 +39,18 @@ impl Compiler {
         Self { command }
     }
 
-    pub fn build(&mut self) {
-        self.command.output().expect("Failed to execute a process");
+    pub fn build(&mut self) -> anyhow::Result<()> {
+        let mut child = self
+            .command
+            .spawn()
+            .with_context(|| "can't run `elm-make` command")?;
+
+        let status = child.wait()?;
+        if !status.success() {
+            println!("Seems like there is a compiler error.\n");
+        }
+
+        Ok(())
     }
 }
 
@@ -54,11 +65,12 @@ fn main() -> anyhow::Result<()> {
     // 6. watch the elm file if ther is any change go to 2
 
     if !args.source.exists() {
-        panic!("File: {:?} not found.", args.source);
+        println!("Error: file {:?} not found.", args.source);
+        std::process::exit(1);
     }
 
     let mut compiler = Compiler::new(&args.source, args.elm_options.take());
-    compiler.build();
+    compiler.build().with_context(|| "compiling source ...")?;
 
     // watch for changes in elm-source
     let (tx, rx) = mpsc::channel();
@@ -73,12 +85,16 @@ fn main() -> anyhow::Result<()> {
     thread::spawn(move || {
         for e in rx {
             match e {
-                Ok(event) => {
-                    if event.kind.is_create() || event.kind.is_modify() {
-                        println!("Got event {:?}, recompiling...", event);
-                        compiler.build();
+                Ok(event) => match event.kind {
+                    // Ignore all other events and recompile if the event is only
+                    // Modify -> Data -> Any
+                    notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                        notify::event::DataChange::Any,
+                    )) => {
+                        let _ = compiler.build();
                     }
-                }
+                    _ => (),
+                },
                 Err(error) => {
                     println!("Got error {:?}", error)
                 }
@@ -87,7 +103,6 @@ fn main() -> anyhow::Result<()> {
     });
 
     let server = Server::http(&args.address).expect("Failed to bind to address");
-    println!("Listening on {}", args.address);
     for request in server.incoming_requests() {
         println!("url: {}", request.url());
         let elm_source = File::open("index.html").expect("Failed to open file");
