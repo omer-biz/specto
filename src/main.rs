@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc,
@@ -28,15 +29,44 @@ pub struct Args {
 
 pub struct Compiler {
     command: Command,
+    output: PathBuf,
 }
 
 impl Compiler {
-    pub fn new(source: &PathBuf, elm_options: Option<Vec<String>>) -> Self {
+    pub fn new(source: &PathBuf, elm_options: Option<Vec<String>>) -> (Self, PathBuf) {
         let mut command = Command::new("elm");
         command.arg("make").arg(source);
-        command.args(elm_options.unwrap_or(vec![]));
 
-        Self { command }
+        let elm_options = elm_options.unwrap_or(vec![]);
+        command.args(&elm_options);
+
+        let output_idx = elm_options
+            .iter()
+            .position(|opt| opt.starts_with("--output"));
+
+        let output = if let Some(index) = output_idx {
+            if let Some(output) = elm_options
+                .get(index)
+                .map(|opt| opt.split("=").nth(1))
+                .flatten()
+            {
+                output
+            } else {
+                "index.html"
+            }
+        } else {
+            "index.html"
+        };
+
+        let output = PathBuf::from(output);
+
+        (
+            Self {
+                command,
+                output: output.clone(),
+            },
+            output,
+        )
     }
 
     pub fn build(&mut self) -> anyhow::Result<()> {
@@ -86,20 +116,21 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let mut compiler = Compiler::new(&args.source, args.elm_options.take());
-    compiler.build().with_context(|| "compiling source ...")?;
+    let (mut compiler, output) = Compiler::new(&args.source, args.elm_options.take());
+    compiler.build()?;
 
     // watch for changes in elm-source
     let (tx, rx) = mpsc::channel();
-    let mut watcher = notify::recommended_watcher(tx).expect("unable to create watcher");
+    let mut watcher =
+        notify::recommended_watcher(tx).with_context(|| "unable to create watcher")?;
     watcher
         .watch(
             args.source.parent().unwrap_or(Path::new(".")),
             RecursiveMode::Recursive,
         )
-        .expect("unable to watch file");
+        .with_context(|| "unable to watch file")?;
 
-    thread::spawn(move || {
+    let _handle = thread::spawn(move || -> anyhow::Result<()> {
         for e in rx {
             match e {
                 Ok(event) => match event.kind {
@@ -108,7 +139,7 @@ fn main() -> anyhow::Result<()> {
                     notify::EventKind::Modify(notify::event::ModifyKind::Data(
                         notify::event::DataChange::Any,
                     )) => {
-                        let _ = compiler.build();
+                        compiler.build()?;
                     }
                     _ => (),
                 },
@@ -117,15 +148,17 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+
+        Ok(())
     });
 
     let server = Server::http(&args.address).expect("Failed to bind to address");
     for request in server.incoming_requests() {
-        println!("url: {}", request.url());
-        let elm_source = File::open("index.html").expect("Failed to open file");
+        let elm_source = File::open(&output).with_context(|| "Failed to open file index.html")?;
         let response = Response::from_file(elm_source);
 
-        request.respond(response).expect("Failed to send response");
+        request.respond(response)?
     }
+
     Ok(())
 }
