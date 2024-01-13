@@ -19,6 +19,10 @@ pub struct Args {
     /// Address to bind to.
     #[arg(short, long, value_name = "ip:port", default_value = "localhost:9000")]
     address: String,
+
+    /// options to put after the `elm make` command.
+    #[arg(last = true, value_name = "<elm-options>")]
+    elm_options: Option<Vec<String>>,
 }
 
 pub struct Compiler {
@@ -26,9 +30,10 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn new(source: &PathBuf) -> Self {
+    pub fn new(source: &PathBuf, elm_options: Option<Vec<String>>) -> Self {
         let mut command = Command::new("elm");
         command.arg("make").arg(source);
+        command.args(elm_options.unwrap_or(vec![]));
 
         Self { command }
     }
@@ -39,7 +44,7 @@ impl Compiler {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // 1. check if the file exists
     // 2. compile it to index.html
@@ -51,7 +56,8 @@ fn main() -> anyhow::Result<()> {
     if !args.source.exists() {
         panic!("File: {:?} not found.", args.source);
     }
-    let mut compiler = Compiler::new(&args.source);
+
+    let mut compiler = Compiler::new(&args.source, args.elm_options.take());
     compiler.build();
 
     // watch for changes in elm-source
@@ -59,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     let mut watcher = notify::recommended_watcher(tx).expect("unable to create watcher");
     watcher
         .watch(
-            &args.source.parent().unwrap_or(Path::new(".")),
+            args.source.parent().unwrap_or(Path::new(".")),
             RecursiveMode::Recursive,
         )
         .expect("unable to watch file");
