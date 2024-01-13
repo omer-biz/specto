@@ -48,7 +48,24 @@ impl Compiler {
         let status = child.wait()?;
         if !status.success() {
             println!("Seems like there is a compiler error.\n");
+        } else {
+            self.inject_websocket_client()?;
         }
+
+        Ok(())
+    }
+
+    fn inject_websocket_client(&self) -> anyhow::Result<()> {
+        let extra_content = br#"
+<script>
+console.log("Hello From The Server");
+</script>
+        "#;
+        let mut f = File::options()
+            .append(true)
+            .open(&self.output)
+            .with_context(|| format!("can not open file {:?}", &self.output))?;
+        f.write_all(extra_content)?;
 
         Ok(())
     }
