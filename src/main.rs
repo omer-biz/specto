@@ -7,7 +7,7 @@ use std::{
 };
 
 use clap::Parser;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecursiveMode, Watcher};
 use tiny_http::{Response, Server};
 
 #[derive(Parser, Debug)]
@@ -21,10 +21,21 @@ pub struct Args {
     address: String,
 }
 
-fn compile_source(source: &PathBuf) {
-    let mut elm_make = Command::new("elm");
-    elm_make.arg("make").arg(source);
-    let _output = elm_make.output().expect("Failed to execute a process");
+pub struct Compiler {
+    command: Command,
+}
+
+impl Compiler {
+    pub fn new(source: &PathBuf) -> Self {
+        let mut command = Command::new("elm");
+        command.arg("make").arg(source);
+
+        Self { command }
+    }
+
+    pub fn build(&mut self) {
+        self.command.output().expect("Failed to execute a process");
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -40,19 +51,18 @@ fn main() -> anyhow::Result<()> {
     if !args.source.exists() {
         panic!("File: {:?} not found.", args.source);
     }
-    compile_source(&args.source);
+    let mut compiler = Compiler::new(&args.source);
+    compiler.build();
 
     // watch for changes in elm-source
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx).expect("unable to create watcher");
-
-    let res = watcher
+    watcher
         .watch(
             &args.source.parent().unwrap_or(Path::new(".")),
             RecursiveMode::Recursive,
         )
         .expect("unable to watch file");
-    println!("res: {:?}", res);
 
     thread::spawn(move || {
         for e in rx {
@@ -60,7 +70,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(event) => {
                     if event.kind.is_create() || event.kind.is_modify() {
                         println!("Got event {:?}, recompiling...", event);
-                        compile_source(&args.source);
+                        compiler.build();
                     }
                 }
                 Err(error) => {
