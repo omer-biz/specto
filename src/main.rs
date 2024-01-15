@@ -1,16 +1,17 @@
 use std::{
-    fs::File,
-    io::Write,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
-    thread,
 };
 
 use anyhow::Context;
 use clap::Parser;
 use notify::{RecursiveMode, Watcher};
-use tiny_http::{Response, Server};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+    net::TcpListener,
+    sync::mpsc,
+};
 
 #[derive(Parser, Debug)]
 pub struct Args {
@@ -37,19 +38,16 @@ impl Compiler {
         let mut command = Command::new("elm");
         command.arg("make").arg(source);
 
-        let elm_options = elm_options.unwrap_or(vec![]);
+        let elm_options = elm_options.unwrap_or_default();
         command.args(&elm_options);
 
         let output_idx = elm_options
             .iter()
             .position(|opt| opt.starts_with("--output"));
 
+        // parse the `--output` argument is provided
         let output = if let Some(index) = output_idx {
-            if let Some(output) = elm_options
-                .get(index)
-                .map(|opt| opt.split("=").nth(1))
-                .flatten()
-            {
+            if let Some(output) = elm_options.get(index).and_then(|opt| opt.split('=').nth(1)) {
                 output
             } else {
                 "index.html"
@@ -69,7 +67,7 @@ impl Compiler {
         )
     }
 
-    pub fn build(&mut self) -> anyhow::Result<()> {
+    pub async fn build(&mut self) -> anyhow::Result<()> {
         let mut child = self
             .command
             .spawn()
@@ -79,29 +77,32 @@ impl Compiler {
         if !status.success() {
             println!("Seems like there is a compiler error.\n");
         } else {
-            self.inject_websocket_client()?;
+            self.inject_websocket_client().await?;
         }
 
         Ok(())
     }
 
-    fn inject_websocket_client(&self) -> anyhow::Result<()> {
+    async fn inject_websocket_client(&self) -> anyhow::Result<()> {
         let extra_content = br#"
-<script>
-console.log("Hello From The Server");
-</script>
-        "#;
+            <script>
+            console.log("Hello From The Server");
+            </script>
+            "#;
         let mut f = File::options()
             .append(true)
             .open(&self.output)
+            .await
             .with_context(|| format!("can not open file {:?}", &self.output))?;
-        f.write_all(extra_content)?;
+
+        f.write_all(extra_content).await?;
 
         Ok(())
     }
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
 
     // 1. check if the file exists
@@ -117,12 +118,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     let (mut compiler, output) = Compiler::new(&args.source, args.elm_options.take());
-    compiler.build()?;
+    compiler.build().await?;
 
     // watch for changes in elm-source
-    let (tx, rx) = mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(tx).with_context(|| "unable to create watcher")?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |e| {
+        let _ = tx.send(e);
+    })
+    .with_context(|| "unable to create watcher")?;
     watcher
         .watch(
             args.source.parent().unwrap_or(Path::new(".")),
@@ -130,35 +133,61 @@ fn main() -> anyhow::Result<()> {
         )
         .with_context(|| "unable to watch file")?;
 
-    let _handle = thread::spawn(move || -> anyhow::Result<()> {
-        for e in rx {
-            match e {
-                Ok(event) => match event.kind {
-                    // Ignore all other events and recompile if the event is only
-                    // Modify -> Data -> Any
-                    notify::EventKind::Modify(notify::event::ModifyKind::Data(
-                        notify::event::DataChange::Any,
-                    )) => {
-                        compiler.build()?;
-                    }
-                    _ => (),
-                },
-                Err(error) => {
-                    println!("Got error {:?}", error)
+    // monitor file changes
+    let _handle = tokio::spawn(async move {
+        loop {
+            if let Some(Ok(e)) = rx.recv().await {
+                // Ignore all other events and recompile if the event is only
+                // Modify -> Data -> Any
+                if let notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Any,
+                )) = e.kind
+                {
+                    let _ = compiler.build().await;
                 }
             }
         }
-
-        Ok(())
     });
 
-    let server = Server::http(&args.address).expect("Failed to bind to address");
-    for request in server.incoming_requests() {
-        let elm_source = File::open(&output).with_context(|| "Failed to open file index.html")?;
-        let response = Response::from_file(elm_source);
+    // serve the compiled elm file
+    let listener = TcpListener::bind(args.address).await?;
 
-        request.respond(response)?
+    // TODO: if the file is not there recompile to the file we know about
+    // which is in `output`
+    loop {
+        let mut head_buf: Vec<u8> = vec![];
+        let mut file_buf: Vec<u8> = vec![];
+
+        // we don't care about the request. gets the same response
+        let (mut client, _peer_addr) = listener.accept().await?;
+        let (_, writer) = client.split();
+
+        // open the file to be served
+        let f = File::open(&output).await?;
+        let file_size = f.metadata().await?.len() as usize;
+        let mut file_reader = BufReader::new(f);
+
+        // building the http header
+        let head_len = head_buf
+            .write(
+                format!(
+        "HTTP/1.1 200 OK\r\n\
+        Content-Type: text/html\r\n\
+        Content-Length: {}\r\n\
+        \r\n",
+                    file_size
+                )
+                .as_bytes(),
+            )
+            .await?;
+
+        // read the file to be served
+        let _ = file_reader.read_to_end(&mut file_buf).await?;
+
+        // serve the file
+        let mut writer = BufWriter::new(writer);
+        writer.write_all(&head_buf[..head_len]).await?;
+        writer.write_all(&file_buf[..file_size]).await?;
+        writer.flush().await?;
     }
-
-    Ok(())
 }

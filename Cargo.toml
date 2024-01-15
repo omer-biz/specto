@@ -9,4 +9,4 @@ edition = "2021"
 anyhow = "1.0.79"
 clap = { version = "4.4.14", features = ["derive"] }
 notify = "6.1.1"
-tiny_http = "0.12.0"
+tokio = { version = "1", features = ["full"] }
