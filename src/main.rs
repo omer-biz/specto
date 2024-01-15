@@ -147,12 +147,7 @@ async fn main() -> anyhow::Result<()> {
 
 
         // inject websocket client
-        let ws_client = br#"
-            <script>
-            console.log("Hello From The Server");
-            </script>
-            "#;
-
+        let ws_client = include!("../ws_client.txt");
         // building the http header
         let head_len = head_buf
             .write(
