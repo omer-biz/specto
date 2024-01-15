@@ -30,7 +30,6 @@ pub struct Args {
 
 pub struct Compiler {
     command: Command,
-    output: PathBuf,
 }
 
 impl Compiler {
@@ -61,13 +60,12 @@ impl Compiler {
         (
             Self {
                 command,
-                output: output.clone(),
             },
             output,
         )
     }
 
-    pub async fn build(&mut self) -> anyhow::Result<()> {
+    pub fn build(&mut self) -> anyhow::Result<()> {
         let mut child = self
             .command
             .spawn()
@@ -76,27 +74,7 @@ impl Compiler {
         let status = child.wait()?;
         if !status.success() {
             println!("Seems like there is a compiler error.\n");
-        } else {
-            self.inject_websocket_client().await?;
-        }
-
-        Ok(())
-    }
-
-    async fn inject_websocket_client(&self) -> anyhow::Result<()> {
-        let extra_content = br#"
-            <script>
-            console.log("Hello From The Server");
-            </script>
-            "#;
-        let mut f = File::options()
-            .append(true)
-            .open(&self.output)
-            .await
-            .with_context(|| format!("can not open file {:?}", &self.output))?;
-
-        f.write_all(extra_content).await?;
-
+        } 
         Ok(())
     }
 }
@@ -118,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (mut compiler, output) = Compiler::new(&args.source, args.elm_options.take());
-    compiler.build().await?;
+    compiler.build()?;
 
     // watch for changes in elm-source
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -143,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
                     notify::event::DataChange::Any,
                 )) = e.kind
                 {
-                    let _ = compiler.build().await;
+                    let _ = compiler.build();
                 }
             }
         }
@@ -167,6 +145,14 @@ async fn main() -> anyhow::Result<()> {
         let file_size = f.metadata().await?.len() as usize;
         let mut file_reader = BufReader::new(f);
 
+
+        // inject websocket client
+        let ws_client = br#"
+            <script>
+            console.log("Hello From The Server");
+            </script>
+            "#;
+
         // building the http header
         let head_len = head_buf
             .write(
@@ -175,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         Content-Type: text/html\r\n\
         Content-Length: {}\r\n\
         \r\n",
-                    file_size
+                    file_size + ws_client.len()
                 )
                 .as_bytes(),
             )
@@ -188,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
         let mut writer = BufWriter::new(writer);
         writer.write_all(&head_buf[..head_len]).await?;
         writer.write_all(&file_buf[..file_size]).await?;
+        writer.write_all(ws_client).await?;
         writer.flush().await?;
     }
 }
