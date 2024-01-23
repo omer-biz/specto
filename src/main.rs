@@ -25,44 +25,31 @@ pub struct Args {
 
     /// options to put after the `elm make` command
     #[arg(last = true, value_name = "<elm-options>")]
-    elm_options: Option<Vec<String>>,
+    elm_args: Option<Vec<String>>,
+}
+
+#[derive(Parser, Debug)]
+pub struct ElmArgs {
+    /// name of the JS file to output.
+    #[arg(default_value = "index.html")]
+    output: String,
 }
 
 pub struct Compiler {
     command: Command,
+
 }
 
 impl Compiler {
-    pub fn new(source: &PathBuf, elm_options: Option<Vec<String>>) -> (Self, PathBuf) {
+    pub fn new(source: &PathBuf, mut elm_options: Option<Vec<String>>) -> Self {
         let mut command = Command::new("elm");
         command.arg("make").arg(source);
 
-        let elm_options = elm_options.unwrap_or_default();
-        command.args(&elm_options);
+        if let Some(elm_options) = elm_options.take() {
+            command.args(&elm_options);
+        }
 
-        let output_idx = elm_options
-            .iter()
-            .position(|opt| opt.starts_with("--output"));
-
-        // parse the `--output` argument is provided
-        let output = if let Some(index) = output_idx {
-            if let Some(output) = elm_options.get(index).and_then(|opt| opt.split('=').nth(1)) {
-                output
-            } else {
-                "index.html"
-            }
-        } else {
-            "index.html"
-        };
-
-        let output = PathBuf::from(output);
-
-        (
-            Self {
-                command,
-            },
-            output,
-        )
+        Self { command }
     }
 
     pub fn build(&mut self) -> anyhow::Result<()> {
@@ -74,7 +61,7 @@ impl Compiler {
         let status = child.wait()?;
         if !status.success() {
             println!("Seems like there is a compiler error.\n");
-        } 
+        }
         Ok(())
     }
 }
@@ -82,6 +69,11 @@ impl Compiler {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
+    let elm_args = args
+        .elm_args
+        .as_ref()
+        .map(|e| ElmArgs::parse_from(e))
+        .unwrap_or(ElmArgs::parse());
 
     // 1. check if the file exists
     // 2. compile it to index.html
@@ -95,7 +87,9 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let (mut compiler, output) = Compiler::new(&args.source, args.elm_options.take());
+    let output = PathBuf::from(elm_args.output);
+
+    let mut compiler = Compiler::new(&args.source, args.elm_args.take());
     compiler.build()?;
 
     // watch for changes in elm-source
@@ -145,14 +139,13 @@ async fn main() -> anyhow::Result<()> {
         let file_size = f.metadata().await?.len() as usize;
         let mut file_reader = BufReader::new(f);
 
-
         // inject websocket client
         let ws_client = include!("../ws_client.txt");
         // building the http header
         let head_len = head_buf
             .write(
                 format!(
-        "HTTP/1.1 200 OK\r\n\
+                    "HTTP/1.1 200 OK\r\n\
         Content-Type: text/html\r\n\
         Content-Length: {}\r\n\
         \r\n",
