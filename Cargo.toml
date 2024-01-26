@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.79"
+axum = "0.7.4"
 clap = { version = "4.4.14", features = ["derive"] }
 notify = "6.1.1"
 tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5.1", features = ["fs"] }
