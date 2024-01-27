@@ -11,6 +11,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 pub struct Websocket {
     rx: UnboundedReceiver<Signal>,
+    buffer: Vec<Signal>,
 }
 
 pub struct Signal {
@@ -20,14 +21,14 @@ pub struct Signal {
 
 impl Websocket {
     pub async fn reload(&mut self) -> Result<()> {
-        let mut buffer: Vec<Signal> = vec![];
-        let _ = self.rx.recv_many(&mut buffer, 100).await;
+        let _size = self.rx.recv_many(&mut self.buffer, 100).await;
 
-        for signal in buffer.into_iter() {
+        for signal in self.buffer.drain(..) {
             println!("msg from ws_client: {}", signal.msg);
             signal.one_tx.send("reload").unwrap();
         }
 
+        self.buffer.clear();
         Ok(())
     }
 }
@@ -46,7 +47,7 @@ pub async fn start_server() -> Result<Websocket> {
         }
     });
 
-    Ok(Websocket { rx })
+    Ok(Websocket { rx, buffer: vec![] })
 }
 
 async fn handle_connection(
