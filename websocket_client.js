@@ -7,6 +7,7 @@ const socketOnOpen = (_event) => {
 
 const socketOnMsg = (event) => {
   const msg = event.data;
+  console.log("msg: ", msg);
   if (msg == "reload") {
     window.location.reload();
   }
@@ -18,8 +19,8 @@ window.onload = (_event) => {
     return;
   }
 
-  const webSocketUrl = window.location.origin.replace(/(^http(s?):\/\/)(.*)/, 'ws$2://$3')
-  const webSocket = new WebSocket(webSocketUrl);
+  // const webSocketUrl = window.location.origin.replace(/(^http(s?):\/\/)(.*)/, 'ws$2://$3')
+  const webSocket = new WebSocket("ws://localhost:9001");
 
   webSocket.onopen = socketOnOpen;
   webSocket.onmessage = socketOnMsg;

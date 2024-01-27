@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use specto::{compiler::Compiler, monitor::Monitor};
+use specto::{compiler::Compiler, monitor};
 use tokio::{net::TcpListener, task::JoinHandle};
 
 use axum::{http::header, response::IntoResponse, routing::get, Router};
@@ -48,12 +48,8 @@ async fn main() -> anyhow::Result<()> {
     compiler.build().await?;
 
     // watch for changes in elm-source
-    let monitor_handler =
-        Monitor::new(compiler)?.watch(args.source.parent().unwrap_or(Path::new(".")))?;
+    let monitor_handler = monitor::watch(compiler, args.source.parent().unwrap_or(Path::new(".")))?;
 
-    // serve the compiled elm file
-    // TODO: if the file is not there recompile to the file we know about
-    // which is in `output`
     let web_handler: JoinHandle<Result<()>> = tokio::spawn(async move {
         let routes = Router::new()
             .route("/ws_client.js", get(serve_ws_client))
